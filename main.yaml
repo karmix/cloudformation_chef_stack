@@ -1,0 +1,348 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Template for deploying Chef Automate, Chef Infra, and Chef Supermarket.
+
+Parameters:
+  AdminKeyPair:
+    Description: Amazon EC2 Key Pair (Admin access to instances)
+    Type: AWS::EC2::KeyPair::KeyName
+  AutomationBucket:
+    Description: S3 bucket containing CloudFormation template and scripts
+    Type: String
+  ChefAutomateLicense:
+    Description: Text of your Automate License (Leave blank for Trial License)
+    Type: String
+    Default: ""
+  ChefAutomateAdminUsername:
+    Description: Username of the Chef Automate admin
+    Type: String
+  ChefAutomateAdminPassword:
+    Description: Password of the Chef Automate admin
+    Type: String
+    NoEcho: true
+  ChefAutomateSSLCert:
+    Description: Text content of your Automate SSL Cert (newlines replaced with literal \n)
+    Type: String
+  ChefAutomateSSLKey:
+    Description: Text content of your Automate SSL Key (newlines replaced with literal \n)
+    Type: String
+    NoEcho: true
+  ChefInfraAdminUsername:
+    Description: Username for the admin user on the Chef Infra Server
+    Type: String
+    Default: chefadmin
+  ChefInfraAdminPassword:
+    Description: Password for the admin user on the Chef Infra Server
+    Type: String
+    NoEcho: true
+  ChefInfraAdminFullname:
+    Description: Full name of the admin user on the Chef Infra Server
+    Type: String
+    Default: Chef Admin
+  ChefInfraAdminEmail:
+    Description: Email of the admin user on the Chef Infra Server
+    Type: String
+    Default: chefadmin@example.com
+  ChefInfraOrgName:
+    Description: Email of the admin user on the Chef Infra Server
+    Type: String
+    Default: exampleorg
+  ChefInfraSSLCert:
+    Description: Text content of your Chef Infra Server SSL Cert (newlines replaced with literal \n)
+    Type: String
+  ChefInfraSSLKey:
+    Description: Text content of your Chef Infra Server SSL Key (newlines replaced with literal \n)
+    Type: String
+    NoEcho: true
+  ChefSupermarketOAuthSSLVerification:
+    Description: Enable/Disable if SSL verification is used for OAuth to the Chef Server
+    Type: String
+    Default: true
+  ChefSupermarketSSLCert:
+    Description: Text content of your Chef Supermarket SSL Cert (newlines replaced with literal \n)
+    Type: String
+  ChefSupermarketSSLKey:
+    Description: Text content of your Chef Supermarket SSL Key (newlines replaced with literal \n)
+    Type: String
+    NoEcho: true
+
+Resources:
+  ChefStackVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+  ChefStackInternetGateway:
+    Type: AWS::EC2::InternetGateway
+  ChefStackInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: ChefStackVPC
+      InternetGatewayId:
+        Ref: ChefStackInternetGateway
+  ChefStackRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ChefStackVPC
+  ChefStackInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: ChefStackInternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ChefStackInternetGateway
+      RouteTableId: !Ref ChefStackRouteTable
+  ChefStackRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ChefStackRouteTable
+      SubnetId: !Ref ChefStackSubnet
+
+  ChefStackSubnet:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId:
+          Ref: ChefStackVPC
+        CidrBlock: 10.0.0.0/16
+
+  ChefStackSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web and SSH
+      VpcId:
+        Ref: ChefStackVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  ChefStackSecretsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      AccessControl: Private
+
+  ChefStackIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+             - ec2.amazonaws.com
+      Path: /
+      Policies:
+       - PolicyName: !Sub ${AWS::StackName}-ChefStack-Policy
+         PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+            - Action: s3:*
+              Effect: Allow
+              Resource:
+                - !Join ['', ['arn:aws:s3:::', !Ref ChefStackSecretsBucket]]
+                - !Join ['', ['arn:aws:s3:::', !Ref ChefStackSecretsBucket, '/*']]
+                - !Join ['', ['arn:aws:s3:::', !Ref AutomationBucket]]
+                - !Join ['', ['arn:aws:s3:::', !Ref AutomationBucket, '/*']]
+            - Action: s3:List*
+              Effect: Allow
+              Resource: arn:aws:s3:::*
+
+  ChefStackInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - Ref: ChefStackIAMRole
+
+  ChefAutomate:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    Properties:
+      KeyName: !Ref AdminKeyPair
+      InstanceType: t2.medium
+      IamInstanceProfile: !Ref ChefStackInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+          - AMI
+          - !Ref AWS::Region
+          - amazonlinux
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - Ref: ChefStackSG
+          SubnetId:
+            Ref: ChefStackSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Capture errors and halt deployment
+          trap '/opt/aws/bin/cfn-signal -e 1 --region ${AWS::Region} --stack ${AWS::StackName} --resource AutomateServer' ERR
+
+          pushd /root/ > /dev/null
+            export CHEF_AUTOMATE_FQDN="$(curl http://169.254.169.254/latest/meta-data/public-ipv4)"
+            export CHEF_AUTOMATE_LICENSE="${ChefAutomateLicense}"
+            export CHEF_AUTOMATE_ADMIN_USERNAME="${ChefAutomateAdminUsername}"
+            export CHEF_AUTOMATE_ADMIN_PASSWORD="${ChefAutomateAdminPassword}"
+            export CHEF_AUTOMATE_SSL_CERT="${ChefAutomateSSLCert}"
+            export CHEF_AUTOMATE_SSL_KEY="${ChefAutomateSSLKey}"
+            aws s3 cp s3://${AutomationBucket}/files/setup/configure_chef_automate.sh /root/
+            bash -xe /root/configure_chef_automate.sh
+          popd > /dev/null
+
+          aws s3 cp /root/automate-credentials.toml s3://${ChefStackSecretsBucket}/
+          aws s3 cp /root/automate_admin_api_token.txt s3://${ChefStackSecretsBucket}/
+
+          /opt/aws/bin/cfn-signal -e 0 \
+                                  --region ${AWS::Region} \
+                                  --stack ${AWS::StackName} \
+                                  --resource ChefAutomate
+
+  ChefInfraServer:
+    Type: AWS::EC2::Instance
+    DependsOn: ChefAutomate
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT20M # Bumped to 20 (Generating dhparams can take a bit)
+    Properties:
+      KeyName: !Ref AdminKeyPair
+      InstanceType: t2.medium
+      IamInstanceProfile: !Ref ChefStackInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+          - AMI
+          - !Ref AWS::Region
+          - amazonlinux
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - Ref: ChefStackSG
+          SubnetId:
+            Ref: ChefStackSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          export CHEF_AUTOMATE_FQDN="${ChefAutomate.PublicIp}"
+          export CHEF_INFRA_SSL_CERT="${ChefInfraSSLCert}"
+          export CHEF_INFRA_SSL_KEY="${ChefInfraSSLKey}"
+          export CHEF_INFRA_ADMIN_USERNAME="${ChefInfraAdminUsername}"
+          export CHEF_INFRA_ADMIN_PASSWORD="${ChefInfraAdminPassword}"
+          export CHEF_INFRA_ADMIN_FULLNAME="${ChefInfraAdminFullname}"
+          export CHEF_INFRA_ADMIN_EMAIL="${ChefInfraAdminEmail}"
+          export CHEF_INFRA_ORG_NAME="${ChefInfraOrgName}"
+          export CHEF_SECRETS_BUCKET="${ChefStackSecretsBucket}"
+          export CHEF_SUPERMARKET_FQDN="${ChefSupermarketEIP}"
+
+          export CHEF_INFRA_FQDN="$(curl http://169.254.169.254/latest/meta-data/public-ipv4)"
+          aws s3 cp s3://${AutomationBucket}/files/setup/configure_chef_infra_server.sh /root/
+
+          aws s3 cp s3://${ChefStackSecretsBucket}/automate_admin_api_token.txt /root/
+          export CHEF_AUTOMATE_API_TOKEN="$(cat /root/automate_admin_api_token)"
+
+          # TODO: Make me a parameter
+          aws s3 cp s3://${AutomationBucket}/files/chef-admin.pub /root/
+          aws s3 cp s3://${AutomationBucket}/files/validator.pub /root/
+
+          bash -xe /root/configure_chef_infra_server.sh
+
+          aws s3 cp /root/supermarket.json s3://${ChefStackSecretsBucket}
+
+          /opt/aws/bin/cfn-signal -e 0 \
+                                  --region ${AWS::Region} \
+                                  --stack ${AWS::StackName} \
+                                  --resource ChefInfraServer
+
+  # We need an EIP here because the IP has to exist for Chef to create oc-id info
+  ChefSupermarketEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: ChefStackInternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  ChefSupermarketInterface:
+      Type: AWS::EC2::NetworkInterface
+      Properties:
+        SubnetId: !Ref ChefStackSubnet
+        GroupSet:
+        - !Ref ChefStackSG
+  ChefSupermarketEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ChefSupermarketEIP.AllocationId
+      NetworkInterfaceId: !Ref ChefSupermarketInterface
+  ChefSupermarket:
+    Type: AWS::EC2::Instance
+    DependsOn: ChefInfraServer
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    Properties:
+      KeyName: !Ref AdminKeyPair
+      InstanceType: t2.medium
+      IamInstanceProfile: !Ref ChefStackInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+          - AMI
+          - !Ref AWS::Region
+          - amazonlinux
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref ChefSupermarketInterface
+          DeviceIndex: 0
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          export CHEF_SUPERMARKET_FQDN="${ChefSupermarketEIP}"
+          export CHEF_SUPERMARKET_SSL_CERT="${ChefSupermarketSSLCert}"
+          export CHEF_SUPERMARKET_SSL_KEY="${ChefSupermarketSSLKey}"
+
+          aws s3 cp s3://${ChefStackSecretsBucket}/supermarket.json /root/
+
+          aws s3 cp s3://${AutomationBucket}/files/setup/configure_supermarket.sh /root/
+
+          bash -xe /root/configure_supermarket.sh
+
+          /opt/aws/bin/cfn-signal -e 0 \
+                                  --region ${AWS::Region} \
+                                  --stack ${AWS::StackName} \
+                                  --resource ChefSupermarket
+
+Outputs:
+  ChefAutomateIP:
+    Description: Public IP address of the Chef Automate server
+    Value:
+      Fn::GetAtt:
+        - ChefAutomate
+        - PublicIp
+  ChefInfraServerIP:
+    Description: Public IP address of the Chef Infra Server
+    Value:
+      Fn::GetAtt:
+        - ChefInfraServer
+        - PublicIp
+  ChefSupermarketIP:
+    Description: Public IP address of the Supermarket server
+    Value: !Ref ChefSupermarketEIP
+
+Mappings:
+  AMI:
+    us-east-1:
+      amazonlinux: ami-0c6b1d09930fac512
+
